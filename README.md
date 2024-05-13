@@ -17,179 +17,179 @@ Projeto instrutora:
 https://github.com/digitalinnovationone/store_api
 
 ### Desafio Final
-Create
+- Create
+
 Mapear uma exceção, caso dê algum erro de inserção e capturar na controller
-Update
+
+- Update
+
 Modifique o método de patch para retornar uma exceção de Not Found, quando o dado não for encontrado
 a exceção deve ser tratada na controller, pra ser retornada uma mensagem amigável pro usuário
 ao alterar um dado, a data de updated_at deve corresponder ao time atual, permitir modificar updated_at também
-Filtros
-cadastre produtos com preços diferentes
-aplique um filtro de preço, assim: (price > 5000 and price < 8000)
+
+- Filtros
+
+Cadastre produtos com preços diferentes e aplique um filtro de preço, assim: (price > 5000 and price < 8000)
 
 # :zap:  Tecnologias Utilizadas
 
 - pipenv - controle de versão
-- PostgreSQL - banco de dados com docker-compose
-- SQLAlchemy + Pydantic + Alembic - conexão com banco de dados
+- MongoDB Atlas - banco de dados na nuvem
+- Pymongo + Pydantic + motor - conexão com banco de dados
 - FastAPI - desenvolver a aplicação
+- Pytest - testes do código
 
 # :bulb: Solução do desafio
 
-https://medium.com/@cgrinaldi/a-simple-python-starter-project-c71b0e57b929
-git init
-pipenv run pre-commit install
+O código foi feito seguindo a aula da instrutora. Porém utilizei o pipenv ao invés do poetry para controle de versão e o MongoDB Atlas para o banco de dados na nuvem ao invés de usar o docker para não precisar instalar o mongodb.
 
-O código foi feita seguindo a aula da instrutora.
-
-Para executar o código:
-
-- Rodar banco de dados na pasta workout_api
-
-```console
-$ docker-compose up -d
-```
-
-- Rodar alembic na pasta do projeto (local do Makefile)
-
-```console
-$ make run-migrations
-```
-
-- Rodar app na pasta do projeto
-
-```console
-$ make run
-```
-
-## Adicionar query parameters nos endpoints
-
-      - atleta
-            - nome
-            - cpf
-
-Foi adicionado no arquivo atleta/controller.py. É necessário fornecer nome e cpf para a consulta.
+A versão do MongoDB não utilizava a versão uuid4 (https://pymongo.readthedocs.io/en/stable/examples/uuid.html#configuring-uuid-representation), então adicionei "uuidRepresentation='standard'" no arquivo store/mongodbAtlas.py:
 
 ```python
-@router.get(
-        path='/nome={nome}',
-        summary='consultar um atleta pelo nome',
-        status_code = status.HTTP_200_OK,
-        response_model= AtletaOut,
-        )
+AsyncIOMotorClient(settings.DATABASE_URL, server_api=ServerApi('1'), uuidRepresentation='standard')
+```
+Todos os testes passaram.
 
+<img src='test_passed.png'>
 
-async def query(nome: str, db_session: DatabaseDependency, cpf: str | None = None) -> AtletaOut:
-    atleta: AtletaOut = (
-    await db_session.execute(select(AtletaModel).filter_by(nome=nome, cpf=cpf))
-        ).scalars().first()
+## Desafios
 
-    if not atleta:
-        raise HTTPException(
-            status_code = status.HTTP_404_NOT_FOUND,
-            detail= f'Atleta não encontrado com nome: {nome}'
+ ### Create
+ - Mapear uma exceção, caso dê algum erro de inserção e capturar na controller
+
+Modifiquei a função create em <b>store/usecases/product.py</b> com try e except para capturar o erro.
+
+```python
+async def create(self, body: ProductIn) -> ProductOut:
+        product_model = ProductModel(**body.model_dump())
+
+        try:
+            await self.collection.insert_one(product_model.model_dump())
+        except:
+            raise Exception("Error: Product Not Inserted")
+
+        return ProductOut(**product_model.model_dump())
+```
+Defini uma entrada de dados incorreta em <b>tests/factories.py</b>
+
+```python
+def product_data_errado():
+    return {'name': 10, 'quantity': '10', 'price': '8.500', 'status': True}
+```
+
+Então ajustei um novo teste em (<b>tests/controllers/test_product.py</b>) após verificar o código do erro
+
+```python
+async def test_controller_create_should_return_not_inserted(client, products_url):
+
+    response = await client.post(products_url, json=product_data_errado())
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+```
+
+### Update
+
+-  Modifique o método de patch para retornar uma exceção de Not Found, quando o dado não for encontrado
+a exceção deve ser tratada na controller, pra ser retornada uma mensagem amigável pro usuário
+ao alterar um dado, a data de updated_at deve corresponder ao time atual, permitir modificar updated_at também
+
+Para também poder atualizar o updated_at modifiquei a classe ProductUpdate em <b>store/schemas/product.py</b>
+
+```python
+class ProductUpdate(BaseSchemaMixin):
+    quantity: Optional[int] = Field(None, description="Product quantity")
+    price: Optional[Decimal_] = Field(None, description="Product price")
+    status: Optional[bool] = Field(None, description="Product status")
+    updated_at: Optional[datetime] = Field(default_factory=datetime.utcnow, description='Product update time')
+```
+
+Modifiquei o endpoint para capturar o erro em <b>store/controllers/product.py</b>
+
+```python
+@router.patch(path="/{id}", status_code=status.HTTP_200_OK)
+async def patch(
+    id: UUID4 = Path(alias="id"),
+    body: ProductUpdate = Body(...),
+    usecase: ProductUsecase = Depends(),
+    ) -> ProductUpdateOut:
+    try:
+        return await usecase.update(id=id, body=body)
+    except NotFoundException as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=exc.message)
+```
+
+E modifiquei a função update da classe ProductUsecase para retornar a mensagem de erro:
+
+```python
+async def update(self, id: UUID, body: ProductUpdate) -> ProductUpdateOut:
+        try:
+            result = await self.collection.find_one_and_update(
+                filter={"id": id},
+                update={"$set": body.model_dump(exclude_none=True)},
+                return_document=pymongo.ReturnDocument.AFTER
             )
-
-    return atleta
+            return ProductUpdateOut(**result)
+        except:
+            raise NotFoundException(message = f'Product not found with filter: {id}')
 ```
 
-## Customizar response de retorno de endpoints
-
-      - get all
-            - atleta
-                  - nome
-                  - centro_treinamento
-                  - categoria
-
-Foi criado o schema personalizado em atletas/schemas.py
+Finalmente adicionei um novo teste em <b>tests/controllers/test_product.py</b>
 
 ```python
-class AtletaResponse(BaseSchema):
-    nome: Annotated[str, Field(description='Nome do Atleta', example='Joao', max_length=50)]
-    categoria: Annotated[CategoriaIn, Field(description='Categoria do Atleta')]
-    centro_treinamento: Annotated[CentroTreinamentoAtleta, Field(description='Centro de treinamento do Atleta')]
+async def test_controller_patch_should_return_not_found(client, products_url, product_inserted):
+    response = await client.patch(f"{products_url}2a53ae4d-604a-465a-93b7-a9656da82039", json={"price": "7.500"})
+
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+    assert response.json() == {'detail': 'Product not found with filter: 2a53ae4d-604a-465a-93b7-a9656da82039'}
+
 ```
 
-Foi adicionado o endpoint no arquivo atleta/controller.py.
+### Filtros
+
+- Cadastre produtos com preços diferentes e aplique um filtro de preço, assim: (price > 5000 and price < 8000)
+
+Para filtrar o valor de preço, defini a função em <b>store/usecases/product.py</b>
 
 ```python
-@router.get(
-        path='/all_atletas',
-        summary='consulta personalizada todos os atletas',
-        status_code = status.HTTP_200_OK,
-        response_model= list[AtletaResponse],
-        )
-
-
-async def query(db_session: DatabaseDependency) -> list[AtletaResponse]:
-    atletas: list[AtletaResponse] = (await db_session.execute(select(AtletaModel))).scalars().all()
-
-    return [AtletaResponse.model_validate(atleta) for atleta in atletas]
+ async def query_filter_price(self, p_min:float, p_max: float) -> List[ProductOut]:
+        return [ProductOut(**item) async for item in self.collection.find(
+             filter = {"price": { "$gte": p_min, "$lte": p_max }})]
 ```
-
-## Manipular exceção de integridade dos dados em cada módulo/tabela
-
-      - sqlalchemy.exc.IntegrityError e devolver a seguinte mensagem: “Já existe um atleta cadastrado com o cpf: x”
-      - status_code: 303
-
-No arquivo atleta/controller.py foi necessário importar:
+E adicionei o endpoint em <b>store/controllers/product.py</b>
 
 ```python
-from sqlalchemy.exc import IntegrityError
+@router.get(path="/filter_price/", status_code=status.HTTP_200_OK)
+async def query_filter(
+    p_min: float,
+    p_max: float,
+    usecase: ProductUsecase = Depends()
+    ) -> List[ProductOut]:
+
+    return await usecase.query_filter_price(p_min, p_max)
 ```
 
-E adicionada a exceção após o try commit.
+Testei na aba <b>/docs</b> do API
+
+<img src='filter_price.png' alt="Query filtrando o preço do produto com valor mínimo e máximo">
+
+## Gihub commit
+
+Com o pre-commit obtive os errors
+
+```console
+- hook id: ruff
+- exit code: 1
+
+store/usecases/product.py:22:9: E722 Do not use bare `except`
+store/usecases/product.py:54:9: E722 Do not use bare `except`
+Found 2 errors.
+```
+
+Então modifiquei referidas linhas no arquivo:
 
 ```python
-    await db_session.commit()
-    except IntegrityError:
-        raise HTTPException(
-            status_code=status.HTTP_303_SEE_OTHER,
-            detail=f'Já existe um atleta cadastrado com o cpf: {atleta_in.cpf}'
-        )
+22 except Exception as ex:
+            raise ex("Error: Product Not Inserted")
+
+54 except Exception:
+            raise NotFoundException(message=f"Product not found with filter: {id}")
 ```
-Analogamente para o controller.py de categorias e centro_treinamento, mas ao invés do CPF o usei o Nome que é a variável única nesse caso.
-
-## Adicionar paginação utilizando a lib: fastapi-pagination
-
-      - limit e offset
-
-No arquivo main.py adicionei o import:
-
-```python
-from fastapi_pagination import add_pagination
-```
-E ao final do arquivo adicionei:
-
-```python
-add_pagination(app)
-```
-
-Adicionei paginação para a consulta de todos os atletas modificando no arquivo atleta/controller.py
-
-Import:
-
-```python
-#Add pagination with SQLAlchemy
-from fastapi_pagination import LimitOffsetPage, Page
-from fastapi_pagination.ext.sqlalchemy import paginate
-```
-Endpoint:
-
-```python
-@router.get(
-        path='/',
-        summary='consultar todos os atletas',
-        status_code = status.HTTP_200_OK,
-        response_model= LimitOffsetPage[AtletaOut],
-        )
-
-
-async def query(db_session: DatabaseDependency):
-
-    return await paginate(db_session, select(AtletaModel))
-```
-
-Todos os endpoints estão funcionando como esperado.
-
-<img src="endpoints.png" alt="Endpoints WorkoutApi" >
